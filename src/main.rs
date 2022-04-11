@@ -1,24 +1,25 @@
+use anyhow::{anyhow, Result};
 use clap::Parser;
+use simplelog::{ColorChoice, Config, LevelFilter, TermLogger, TerminalMode};
 
-use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 
-use tokio::time::Duration;
-use tokio::sync::Mutex;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tokio::time::Duration;
 
-use std::sync::Arc;
-use std::io::Write;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio_tungstenite::{accept_async, connect_async, WebSocketStream};
-use tungstenite::{Message, Result, Error};
+use tungstenite::{Error, Message};
 
-use futures_util::{SinkExt, StreamExt, stream::SplitSink};
+use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
 /// Simple implementation of a p2p chat.
-/// 
+///
 /// To start a new peer, pass `period` and
 /// `port` required arguments. All following peers
 /// should be connected to the first one via an
@@ -46,12 +47,15 @@ fn gen_message() -> String {
 
 type PeerMap = Arc<Mutex<HashMap<u16, SplitSink<WebSocketStream<TcpStream>, Message>>>>;
 
-async fn handle_connection(stream: TcpStream, peer_port: u16, server_port: u16, peer_map: PeerMap) -> Result<()> {
+async fn handle_connection(stream: TcpStream, peer_port: u16, peer_map: PeerMap) -> Result<()> {
     log::trace!("New WebSocket connection: {}", stream.local_addr()?);
     let ws_stream = accept_async(stream).await.expect("Failed to accept");
     let (ws_sender, mut ws_receiver) = ws_stream.split();
     peer_map.lock().await.insert(peer_port, ws_sender);
-    log::info!("peer_map: {:?}", peer_map.lock().await.keys().collect::<Vec<_>>());
+    log::info!(
+        "peer_map: {:?}",
+        peer_map.lock().await.keys().collect::<Vec<_>>()
+    );
 
     loop {
         tokio::select! {
@@ -94,18 +98,27 @@ async fn handle_connection(stream: TcpStream, peer_port: u16, server_port: u16, 
 
     Ok(())
 }
-async fn accept_connection(stream: TcpStream, peer_port: u16, server_port: u16, peer_map: PeerMap) {
+async fn accept_connection(stream: TcpStream, peer_port: u16, peer_map: PeerMap) -> Result<()> {
     log::info!("ACCEPTING: {}", peer_port);
-    if let Err(e) = handle_connection(stream, peer_port, server_port, peer_map).await {
-        match e {
-            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => (),
-            err => log::error!("Error processing connection: {}", err),
+    if let Err(e) = handle_connection(stream, peer_port, peer_map).await {
+        match e.downcast()? {
+            Error::ConnectionClosed | Error::Protocol(_) | Error::Utf8 => Ok(()),
+            err => Err(anyhow!("Connection could not be accepted: {}", err)),
         }
+    } else {
+        Ok(())
     }
 }
 
-async fn connect_client(connect_addr: String, client_port: u16, server_port: u16, msg_period: u64) -> Result<()> {
-    let (ws_stream, _) = connect_async(connect_addr).await.expect("Failed to connect");
+async fn connect_client(
+    connect_addr: String,
+    client_port: u16,
+    server_port: u16,
+    msg_period: u64,
+) -> Result<()> {
+    let (ws_stream, _) = connect_async(connect_addr)
+        .await
+        .expect("Failed to connect");
     log::trace!("WebSocket handshake has been successfully completed");
 
     let (mut client_ws_sender, mut client_ws_reader) = ws_stream.split();
@@ -136,25 +149,19 @@ async fn connect_client(connect_addr: String, client_port: u16, server_port: u16
 }
 #[tokio::main]
 async fn main() -> Result<()> {
-    // pretty_env_logger::init_timed();
-    pretty_env_logger::formatted_timed_builder()
-        .format(|buf, record| {
-            writeln!(buf,
-                "{} [{}]: {}",
-                record.level(),
-                chrono::Local::now().format("%H:%M:%S%.3f"),
-                record.args())
-        })
-        .filter(None, log::LevelFilter::Info)
-        .init();
-        // .
+    TermLogger::init(
+        LevelFilter::Info,
+        Config::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )?;
 
     let args = Args::parse();
 
     if let Some(parent) = args.connect {
         let connect_addr = format!("ws://127.0.0.1:{}", parent);
         let parent_port = parent.parse::<u16>().unwrap();
-    
+
         connect_client(connect_addr, args.port, parent_port, args.period).await?;
     } else {
         let addr = format!("127.0.0.1:{}", args.port);
@@ -164,30 +171,25 @@ async fn main() -> Result<()> {
         let peer_map: PeerMap = Arc::new(Mutex::new(HashMap::new()));
 
         let connect_addr = format!("ws://127.0.0.1:{}", args.port);
-        tokio::spawn(
-            connect_client(connect_addr, args.port, args.port, args.period)
-        );
+        tokio::spawn(connect_client(
+            connect_addr,
+            args.port,
+            args.port,
+            args.period,
+        ));
         loop {
             tokio::select! {
                 Ok((stream, _)) = listener.accept() => {
                     let peer = stream.peer_addr().expect("connected streams should have a peer address");
                     log::info!("Peer address: {}", peer);
                     // let server = server.clone();
-                    tokio::spawn(accept_connection(stream, peer.port(), args.port, peer_map.clone()));
+                    tokio::spawn(accept_connection(stream, peer.port(), peer_map.clone()));
                 }
                 _ = tokio::signal::ctrl_c() => {
                     break;
                 }
             }
         }
-        // while let Ok((stream, _)) = listener.accept().await {
-        //     let peer = stream.peer_addr().expect("connected streams should have a peer address");
-        //     log::info!("Peer address: {}", peer);
-        //     // let server = server.clone();
-        //     tokio::spawn(
-        //         accept_connection(stream, peer.port(), args.port, peer_map.clone())
-        //     );
-        // }
     }
 
     Ok(())
