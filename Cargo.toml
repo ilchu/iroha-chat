@@ -1,5 +1,6 @@
 [package]
 name = "iroha-chat"
+authors = ["Ilia Churin <churin.ilya@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 
@@ -18,3 +19,7 @@ tokio = {version = "1.17.0", features = ["rt-multi-thread", "io-std", "macros", 
 tokio-stream = "0.1.8"
 tokio-tungstenite = "0.17.1"
 tungstenite = "0.17.2"
+
+[dev-dependencies]
+assert_cmd = "2.0.4"
+insta = "1.14.0"
